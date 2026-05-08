@@ -39,6 +39,7 @@ type App struct {
 	// UI components
 	pages                  *tview.Pages
 	mainLayout             *tview.Flex
+	mainContent            *tview.Flex
 	navigationTree         *tview.TreeView
 	issuesTable            *tview.Table // Legacy - kept for backward compatibility during migration
 	myIssuesTable          *tview.Table
@@ -72,6 +73,9 @@ type App struct {
 	issues              []linearapi.Issue
 	focusedPane         FocusTarget
 	activeIssuesSection IssuesSection // Tracks which issues section (My/Other) is currently active
+	paneZoomed          bool
+	zoomedPane          FocusTarget
+	previousFocusedPane FocusTarget
 
 	// Issue tree state (for sub-issue hierarchy)
 	// Legacy fields - kept for backward compatibility during migration
@@ -121,6 +125,10 @@ type App struct {
 type FocusTarget int
 
 const (
+	FocusNone FocusTarget = -1
+)
+
+const (
 	FocusNavigation FocusTarget = iota
 	FocusIssues
 	FocusDetails
@@ -145,6 +153,8 @@ func NewApp(api *linearapi.Client, cfg config.Config, templates []config.AgentPr
 		density:              density,
 		pages:                tview.NewPages(),
 		focusedPane:          FocusNavigation,
+		zoomedPane:           FocusNone,
+		previousFocusedPane:  FocusNone,
 		sortField:            SortByUpdatedAt,
 		expandedState:        make(map[string]bool),
 		idToIssue:            make(map[string]*linearapi.Issue),
@@ -607,15 +617,13 @@ func (a *App) buildLayout() {
 	a.statusBar = a.buildStatusBar()
 
 	// Create horizontal split: navigation (20%) | issues (50%) | details (30%)
-	contentFlex := tview.NewFlex().
-		AddItem(a.navigationTree, 0, 2, true).
-		AddItem(a.issuesColumn, 0, 5, false).
-		AddItem(a.detailsView, 0, 3, false)
+	a.mainContent = tview.NewFlex()
+	a.updatePaneLayout()
 
 	// Create vertical layout: content + status bar
 	a.mainLayout = tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		AddItem(contentFlex, 0, 1, true).
+		AddItem(a.mainContent, 0, 1, true).
 		AddItem(a.statusBar, 1, 1, false)
 
 	// Build palette modal
@@ -643,142 +651,229 @@ func (a *App) buildLayout() {
 
 // bindGlobalKeys sets up global keyboard shortcuts.
 func (a *App) bindGlobalKeys() {
-	a.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		// Handle picker modal if active
-		if a.pickerActive {
-			return a.pickerModal.HandleKey(event)
-		}
+	a.app.SetInputCapture(a.handleGlobalKey)
+}
 
-		// Check if create issue modal is visible and handle its keys
-		if a.pages.HasPage("create_issue") && a.createIssueModal != nil {
-			return a.createIssueModal.HandleKey(event)
-		}
+func (a *App) handleGlobalKey(event *tcell.EventKey) *tcell.EventKey {
+	// Handle picker modal if active
+	if a.pickerActive {
+		return a.pickerModal.HandleKey(event)
+	}
 
-		// Check if create comment modal is visible and handle its keys
-		if a.pages.HasPage("create_comment") && a.createCommentModal != nil {
-			return a.createCommentModal.HandleKey(event)
-		}
+	// Check if create issue modal is visible and handle its keys
+	if a.pages.HasPage("create_issue") && a.createIssueModal != nil {
+		return a.createIssueModal.HandleKey(event)
+	}
 
-		// Check if edit title modal is visible and handle its keys
-		if a.pages.HasPage("edit_title") && a.editTitleModal != nil {
-			return a.editTitleModal.HandleKey(event)
-		}
+	// Check if create comment modal is visible and handle its keys
+	if a.pages.HasPage("create_comment") && a.createCommentModal != nil {
+		return a.createCommentModal.HandleKey(event)
+	}
 
-		// Check if edit labels modal is visible and handle its keys
-		if a.pages.HasPage("edit_labels") && a.editLabelsModal != nil {
-			return a.editLabelsModal.HandleKey(event)
-		}
+	// Check if edit title modal is visible and handle its keys
+	if a.pages.HasPage("edit_title") && a.editTitleModal != nil {
+		return a.editTitleModal.HandleKey(event)
+	}
 
-		// Check if settings modal is visible and handle its keys
-		if a.pages.HasPage("settings") && a.settingsModal != nil {
-			return a.settingsModal.HandleKey(event)
-		}
+	// Check if edit labels modal is visible and handle its keys
+	if a.pages.HasPage("edit_labels") && a.editLabelsModal != nil {
+		return a.editLabelsModal.HandleKey(event)
+	}
 
-		// Check if prompt templates modal is visible and handle its keys
-		if a.pages.HasPage("prompt_templates") && a.promptTemplatesModal != nil {
-			return a.promptTemplatesModal.HandleKey(event)
-		}
+	// Check if settings modal is visible and handle its keys
+	if a.pages.HasPage("settings") && a.settingsModal != nil {
+		return a.settingsModal.HandleKey(event)
+	}
 
-		// Check if agent prompt modal is visible and handle its keys
-		if a.pages.HasPage("agent_prompt") && a.agentPromptModal != nil {
-			return a.agentPromptModal.HandleKey(event)
-		}
+	// Check if prompt templates modal is visible and handle its keys
+	if a.pages.HasPage("prompt_templates") && a.promptTemplatesModal != nil {
+		return a.promptTemplatesModal.HandleKey(event)
+	}
 
-		// Check if agent output modal is visible and handle its keys
-		if a.pages.HasPage("agent_output") && a.agentOutputModal != nil {
-			return a.agentOutputModal.HandleKey(event)
-		}
+	// Check if agent prompt modal is visible and handle its keys
+	if a.pages.HasPage("agent_prompt") && a.agentPromptModal != nil {
+		return a.agentPromptModal.HandleKey(event)
+	}
 
-		// Handle palette first if it's open
-		if a.focusedPane == FocusPalette {
-			return a.handlePaletteKey(event)
-		}
+	// Check if agent output modal is visible and handle its keys
+	if a.pages.HasPage("agent_output") && a.agentOutputModal != nil {
+		return a.agentOutputModal.HandleKey(event)
+	}
 
-		// Global shortcuts (only when not in palette)
-		switch event.Key() {
-		case tcell.KeyEscape:
-			// Clear search if active (when not in modals/palette)
-			if a.searchQuery != "" {
-				a.setSearchQuery("")
-				return nil
-			}
-		case tcell.KeyCtrlC:
-			a.app.Stop()
+	// Handle palette first if it's open
+	if a.focusedPane == FocusPalette {
+		return a.handlePaletteKey(event)
+	}
+
+	if a.isZoomedPaneSwitchKey(event) {
+		return nil
+	}
+
+	// Global shortcuts (only when not in palette)
+	switch event.Key() {
+	case tcell.KeyEscape:
+		// Clear search if active (when not in modals/palette)
+		if a.searchQuery != "" {
+			a.setSearchQuery("")
 			return nil
-		case tcell.KeyTab, tcell.KeyBacktab:
-			// Tab cycles forward through panes (Navigation -> Issues -> Details)
-			// When in Details pane, first cycle between description and comments
-			// Only cycle when not in palette or modals
-			isBackward := event.Key() == tcell.KeyBacktab || event.Modifiers()&tcell.ModShift != 0
-			if a.focusedPane != FocusPalette {
-				if a.focusedPane == FocusDetails {
-					if !a.detailsCommentsVisible {
-						if isBackward {
-							a.cyclePanesBackward()
-						} else {
-							a.cyclePanesForward()
-						}
-						return nil
-					}
-					// Cycle between description and comments within details pane
-					if !isBackward {
-						// Tab: description -> comments -> next pane
-						if a.focusedDetailsView {
-							// Currently on comments, move to next pane
-							a.focusedDetailsView = false // Reset for next time
-							a.cyclePanesForward()
-						} else {
-							// Currently on description, move to comments
-							a.focusedDetailsView = true
-							a.updateFocus()
-						}
-					} else {
-						// Shift+Tab: comments -> description -> previous pane
-						if a.focusedDetailsView {
-							// Currently on comments, move to description
-							a.focusedDetailsView = false
-							a.updateFocus()
-						} else {
-							// Currently on description, move to previous pane
-							a.cyclePanesBackward()
-						}
-					}
-				} else {
+		}
+	case tcell.KeyCtrlC:
+		a.app.Stop()
+		return nil
+	case tcell.KeyTab, tcell.KeyBacktab:
+		// Tab cycles forward through panes (Navigation -> Issues -> Details)
+		// When in Details pane, first cycle between description and comments
+		// Only cycle when not in palette or modals
+		isBackward := event.Key() == tcell.KeyBacktab || event.Modifiers()&tcell.ModShift != 0
+		if a.focusedPane != FocusPalette {
+			if a.focusedPane == FocusDetails {
+				if !a.detailsCommentsVisible {
 					if isBackward {
-						// Shift+Tab cycles backward
 						a.cyclePanesBackward()
 					} else {
 						a.cyclePanesForward()
 					}
+					return nil
 				}
+				// Cycle between description and comments within details pane
+				if !isBackward {
+					// Tab: description -> comments -> next pane
+					if a.focusedDetailsView {
+						// Currently on comments, move to next pane
+						a.focusedDetailsView = false // Reset for next time
+						a.cyclePanesForward()
+					} else {
+						// Currently on description, move to comments
+						a.focusedDetailsView = true
+						a.updateFocus()
+					}
+				} else {
+					// Shift+Tab: comments -> description -> previous pane
+					if a.focusedDetailsView {
+						// Currently on comments, move to description
+						a.focusedDetailsView = false
+						a.updateFocus()
+					} else {
+						// Currently on description, move to previous pane
+						a.cyclePanesBackward()
+					}
+				}
+			} else if isBackward {
+				// Shift+Tab cycles backward
+				a.cyclePanesBackward()
+			} else {
+				a.cyclePanesForward()
 			}
+		}
+		return nil
+	case tcell.KeyRune:
+		switch event.Rune() {
+		case 'q':
+			a.app.Stop()
 			return nil
-		case tcell.KeyRune:
-			switch event.Rune() {
-			case 'q':
-				a.app.Stop()
-				return nil
-			case ':':
-				a.openPalette()
-				return nil
-			case '/':
-				a.openSearchPalette()
-				return nil
-			}
+		case ':':
+			a.openPalette()
+			return nil
+		case '/':
+			a.openSearchPalette()
+			return nil
 		}
+	}
 
-		// Pane-specific shortcuts
-		switch a.focusedPane {
+	// Pane-specific shortcuts
+	switch a.focusedPane {
+	case FocusNavigation:
+		return a.handleNavigationKey(event)
+	case FocusIssues:
+		return a.handleIssuesKey(event)
+	case FocusDetails:
+		return a.handleDetailsKey(event)
+	}
+
+	return event
+}
+
+func (a *App) isZoomedPaneSwitchKey(event *tcell.EventKey) bool {
+	if !a.paneZoomed {
+		return false
+	}
+
+	switch event.Key() {
+	case tcell.KeyTab, tcell.KeyBacktab, tcell.KeyLeft, tcell.KeyRight:
+		return true
+	case tcell.KeyRune:
+		switch event.Rune() {
+		case 'h', 'l':
+			return true
+		}
+	}
+
+	return false
+}
+
+func (a *App) togglePaneZoom() bool {
+	if a.paneZoomed {
+		a.restorePaneZoom()
+		return true
+	}
+	return a.zoomFocusedPane()
+}
+
+func (a *App) zoomFocusedPane() bool {
+	switch a.focusedPane {
+	case FocusNavigation, FocusIssues, FocusDetails:
+		a.paneZoomed = true
+		a.zoomedPane = a.focusedPane
+		a.previousFocusedPane = a.focusedPane
+		a.updatePaneLayout()
+		a.updateFocus()
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *App) restorePaneZoom() {
+	a.paneZoomed = false
+	if a.previousFocusedPane != FocusNone {
+		a.focusedPane = a.previousFocusedPane
+	}
+	a.zoomedPane = FocusNone
+	a.previousFocusedPane = FocusNone
+	a.updatePaneLayout()
+	a.updateFocus()
+}
+
+func (a *App) updatePaneLayout() {
+	if a.mainContent == nil {
+		return
+	}
+
+	a.mainContent.Clear()
+	if a.paneZoomed {
+		switch a.zoomedPane {
 		case FocusNavigation:
-			return a.handleNavigationKey(event)
+			a.mainContent.AddItem(a.navigationTree, 0, 1, true)
 		case FocusIssues:
-			return a.handleIssuesKey(event)
+			a.mainContent.AddItem(a.issuesColumn, 0, 1, true)
 		case FocusDetails:
-			return a.handleDetailsKey(event)
+			a.mainContent.AddItem(a.detailsView, 0, 1, true)
+		default:
+			a.paneZoomed = false
+			a.zoomedPane = FocusNone
+			a.addNormalPaneLayout()
 		}
+		return
+	}
 
-		return event
-	})
+	a.addNormalPaneLayout()
+}
+
+func (a *App) addNormalPaneLayout() {
+	a.mainContent.
+		AddItem(a.navigationTree, 0, 2, true).
+		AddItem(a.issuesColumn, 0, 5, false).
+		AddItem(a.detailsView, 0, 3, false)
 }
 
 // handleNavigationKey handles keyboard input when navigation pane is focused.
@@ -789,7 +884,12 @@ func (a *App) handleNavigationKey(event *tcell.EventKey) *tcell.EventKey {
 		a.updateFocus()
 		return nil
 	case tcell.KeyRune:
-		if event.Rune() == 'l' {
+		switch event.Rune() {
+		case 'z':
+			if a.togglePaneZoom() {
+				return nil
+			}
+		case 'l':
 			a.focusedPane = FocusIssues
 			a.updateFocus()
 			return nil
@@ -812,6 +912,12 @@ func (a *App) handleIssuesKey(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case tcell.KeyRune:
 		r := event.Rune()
+		if r == 'z' {
+			if a.togglePaneZoom() {
+				return nil
+			}
+			return event
+		}
 		// Handle vim-style navigation first
 		switch r {
 		case 'h':
@@ -845,7 +951,12 @@ func (a *App) handleDetailsKey(event *tcell.EventKey) *tcell.EventKey {
 		a.updateFocus()
 		return nil
 	case tcell.KeyRune:
-		if event.Rune() == 'h' {
+		switch event.Rune() {
+		case 'z':
+			if a.togglePaneZoom() {
+				return nil
+			}
+		case 'h':
 			a.focusedPane = FocusIssues
 			a.updateFocus()
 			return nil
@@ -1673,15 +1784,15 @@ func (a *App) updateStatusBar() {
 
 	switch a.focusedPane {
 	case FocusNavigation:
-		helpText = fmt.Sprintf("%s↑↓: navigate | Enter: select | Tab/→/l: next pane | Shift+Tab/←/h: prev pane | :: palette | /: search | q: quit[-]", keyColor)
+		helpText = fmt.Sprintf("%s↑↓: navigate | Enter: select | z: zoom/restore | Tab/→/l: next pane | Shift+Tab/←/h: prev pane | :: palette | /: search | q: quit[-]", keyColor)
 	case FocusIssues:
-		helpText = fmt.Sprintf("%sj/k: navigate | Enter: select | Tab/→/l: next pane | Shift+Tab/←/h: prev pane | :: palette | /: search | q: quit[-]", keyColor)
+		helpText = fmt.Sprintf("%sj/k: navigate | Enter: select | z: zoom/restore | Tab/→/l: next pane | Shift+Tab/←/h: prev pane | :: palette | /: search | q: quit[-]", keyColor)
 	case FocusDetails:
-		helpText = fmt.Sprintf("%sj/k: scroll | Tab: switch description/comments | →/l: next pane | Shift+Tab/←/h: prev pane | :: palette | /: search | q: quit[-]", keyColor)
+		helpText = fmt.Sprintf("%sj/k: scroll | Tab: switch description/comments | z: zoom/restore | →/l: next pane | Shift+Tab/←/h: prev pane | :: palette | /: search | q: quit[-]", keyColor)
 	case FocusPalette:
 		helpText = fmt.Sprintf("%s↑↓: navigate | Enter: execute | Esc: close[-]", keyColor)
 	default:
-		helpText = fmt.Sprintf("%sj/k: navigate | Tab: next pane | Shift+Tab: prev pane | :: palette | /: search | q: quit[-]", keyColor)
+		helpText = fmt.Sprintf("%sj/k: navigate | z: zoom/restore | Tab: next pane | Shift+Tab: prev pane | :: palette | /: search | q: quit[-]", keyColor)
 	}
 
 	navText := ""

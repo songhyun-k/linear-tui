@@ -154,6 +154,7 @@ To disable logging, set `log_file` to an empty string in the settings file or vi
 - `g` - Jump to top
 - `G` - Jump to bottom
 - `Tab` / `Shift+Tab` - Cycle between panes
+- `z` - Zoom/restore focused pane
 - `Space` - Toggle expand/collapse sub-issues
 - `Enter` - Select issue / Execute command
 - `Esc` - Close palette / Cancel / Clear search
