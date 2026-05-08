@@ -876,6 +876,19 @@ func (a *App) addNormalPaneLayout() {
 		AddItem(a.detailsView, 0, 3, false)
 }
 
+func (a *App) syncZoomedPaneWithFocus() {
+	if !a.paneZoomed {
+		return
+	}
+	switch a.focusedPane {
+	case FocusNavigation, FocusIssues, FocusDetails:
+		if a.zoomedPane != a.focusedPane {
+			a.zoomedPane = a.focusedPane
+			a.updatePaneLayout()
+		}
+	}
+}
+
 // handleNavigationKey handles keyboard input when navigation pane is focused.
 func (a *App) handleNavigationKey(event *tcell.EventKey) *tcell.EventKey {
 	switch event.Key() {
@@ -1099,6 +1112,8 @@ func (a *App) cyclePanesBackward() {
 
 // updateFocus updates the focus state of all panes.
 func (a *App) updateFocus() {
+	a.syncZoomedPaneWithFocus()
+
 	switch a.focusedPane {
 	case FocusNavigation:
 		a.app.SetFocus(a.navigationTree)
@@ -1267,7 +1282,11 @@ func (a *App) openSearchPalette() {
 func (a *App) closePalette() {
 	a.paletteCtrl.SetSearchMode(false)
 	a.pages.HidePage("palette")
-	a.focusedPane = FocusNavigation
+	if a.paneZoomed && a.zoomedPane != FocusNone {
+		a.focusedPane = a.zoomedPane
+	} else {
+		a.focusedPane = FocusNavigation
+	}
 	a.updateFocus()
 }
 

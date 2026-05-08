@@ -482,6 +482,66 @@ func TestZoomedIssuesPane_PreservesTableNavigation(t *testing.T) {
 	}
 }
 
+func TestZoomedIssuesPane_EnterKeepsVisiblePaneInSyncWithFocus(t *testing.T) {
+	app := NewApp(&linearapi.Client{}, config.Config{}, nil)
+	app.queueUpdateDraw = func(f func()) { f() }
+
+	issue := linearapi.Issue{ID: "issue-1", Identifier: "ABC-1", Title: "Leaf", State: "Todo"}
+	app.fetchIssueByID = func(ctx context.Context, id string) (linearapi.Issue, error) {
+		return issue, nil
+	}
+	app.updateIssuesData([]linearapi.Issue{issue}, issue.ID)
+
+	app.focusedPane = FocusIssues
+	app.activeIssuesSection = IssuesSectionOther
+	if !app.togglePaneZoom() {
+		t.Fatal("togglePaneZoom() = false, want true")
+	}
+
+	handler := app.otherIssuesTable.InputHandler()
+	handler(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone), nil)
+
+	if !app.paneZoomed {
+		t.Fatal("paneZoomed = false, want true")
+	}
+	if app.focusedPane != FocusDetails {
+		t.Fatalf("focusedPane = %v, want %v", app.focusedPane, FocusDetails)
+	}
+	if app.zoomedPane != FocusDetails {
+		t.Fatalf("zoomedPane = %v, want %v", app.zoomedPane, FocusDetails)
+	}
+	if app.mainContent.GetItemCount() != 1 {
+		t.Fatalf("zoomed pane count = %d, want 1", app.mainContent.GetItemCount())
+	}
+	if app.mainContent.GetItem(0) != app.detailsView {
+		t.Fatal("zoomed pane is not details")
+	}
+}
+
+func TestZoomedPane_ClosePaletteRestoresZoomedPaneFocus(t *testing.T) {
+	app := NewApp(&linearapi.Client{}, config.Config{}, nil)
+	app.focusedPane = FocusDetails
+	if !app.togglePaneZoom() {
+		t.Fatal("togglePaneZoom() = false, want true")
+	}
+
+	app.openPalette()
+	app.closePalette()
+
+	if app.focusedPane != FocusDetails {
+		t.Fatalf("focusedPane = %v, want %v", app.focusedPane, FocusDetails)
+	}
+	if app.zoomedPane != FocusDetails {
+		t.Fatalf("zoomedPane = %v, want %v", app.zoomedPane, FocusDetails)
+	}
+	if app.mainContent.GetItemCount() != 1 {
+		t.Fatalf("zoomed pane count = %d, want 1", app.mainContent.GetItemCount())
+	}
+	if app.mainContent.GetItem(0) != app.detailsView {
+		t.Fatal("zoomed pane is not details")
+	}
+}
+
 func TestZoomedPaneSwitchKeysAreIgnored(t *testing.T) {
 	tests := []struct {
 		name  string
